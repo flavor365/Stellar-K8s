@@ -2201,8 +2201,7 @@ async fn perform_quorum_analysis(client: &Client, node: &StellarNode) -> Result<
 
     // Get pod IPs for all validator pods
     let pod_api: Api<k8s_openapi::api::core::v1::Pod> = Api::namespaced(client.clone(), &namespace);
-    let lp =
-        kube::api::ListParams::default().labels(&format!("app.kubernetes.io/instance={}", name));
+    let lp = kube::api::ListParams::default().labels(&format!("app.kubernetes.io/instance={name}"));
 
     let pods = pod_api.list(&lp).await.map_err(Error::KubeError)?;
     let pod_ips: Vec<String> = pods
@@ -2226,7 +2225,7 @@ async fn perform_quorum_analysis(client: &Client, node: &StellarNode) -> Result<
     let result = tokio::time::timeout(Duration::from_secs(30), analysis_future)
         .await
         .map_err(|_| Error::ConfigError("Quorum analysis timeout".to_string()))?
-        .map_err(|e| Error::ConfigError(format!("Quorum analysis failed: {}", e)))?;
+        .map_err(|e| Error::ConfigError(format!("Quorum analysis failed: {e}")))?;
 
     // Update metrics
     #[cfg(feature = "metrics")]
@@ -2266,7 +2265,7 @@ async fn perform_quorum_analysis(client: &Client, node: &StellarNode) -> Result<
     analyzer
         .update_node_status(client, node, &result)
         .await
-        .map_err(|e| Error::ConfigError(format!("Failed to update status: {}", e)))?;
+        .map_err(|e| Error::ConfigError(format!("Failed to update status: {e}")))?;
 
     info!(
         "Quorum analysis complete for {}/{}: fragility={:.3}, critical_nodes={}, min_overlap={}",
