@@ -99,7 +99,12 @@ pub async fn execute_dr_drill(
                 #[cfg(feature = "metrics")]
                 {
                     let ttr_ms = result.time_to_recovery_ms.unwrap_or(0) as i64;
-                    metrics::observe_dr_drill_execution(&namespace, &name, "success", ttr_ms as f64);
+                    metrics::observe_dr_drill_execution(
+                        &namespace,
+                        &name,
+                        "success",
+                        ttr_ms as f64,
+                    );
                     metrics::set_dr_drill_time_to_recovery(&namespace, &name, "success", ttr_ms);
                 }
 
@@ -125,9 +130,9 @@ pub async fn execute_dr_drill(
             }
         }
         Err(e) => {
-            error!("DR drill execution error for {}/{}: {}", namespace, name, e);
+            error!("DR drill execution error for {}/{}: {e}", namespace, name);
             result.status = DRDrillStatus::Failed;
-            result.message = format!("Drill execution failed: {}", e);
+            result.message = format!("Drill execution failed: {e}");
             result.time_to_recovery_ms = Some(drill_start.elapsed().as_millis() as u64);
             result.completed_at = Some(Utc::now().to_rfc3339());
 
@@ -176,12 +181,16 @@ async fn execute_drill_phases(
     }
 
     // Phase 2: Verify standby takeover
-    debug!("Phase 2: Verifying standby takeover for {}/{}", namespace, name);
+    debug!(
+        "Phase 2: Verifying standby takeover for {}/{}",
+        namespace, name
+    );
     let standby_healthy = verify_standby_takeover(client, node, drill_config).await?;
 
     // Phase 3: Verify application availability
     debug!(
-        "Phase 3: Verifying application availability for {}/{}", namespace, name
+        "Phase 3: Verifying application availability for {}/{}",
+        namespace, name
     );
     let app_available = verify_application_availability(client, node, drill_config).await?;
 
@@ -195,8 +204,7 @@ async fn execute_drill_phases(
         standby_takeover_success: standby_healthy,
         application_availability: app_available,
         message: format!(
-            "Standby takeover: {}, Application available: {}",
-            standby_healthy, app_available
+            "Standby takeover: {standby_healthy}, Application available: {app_available}"
         ),
         started_at: Utc::now().to_rfc3339(),
         completed_at: None,
@@ -300,11 +308,7 @@ async fn schedule_drill_rollback(
 }
 
 /// Update drill status annotation on the node
-async fn update_drill_annotation(
-    client: &Client,
-    node: &StellarNode,
-    status: &str,
-) -> Result<()> {
+async fn update_drill_annotation(client: &Client, node: &StellarNode, status: &str) -> Result<()> {
     let namespace = node.namespace().unwrap_or_else(|| "default".to_string());
     let name = node.name_any();
 
@@ -318,9 +322,13 @@ async fn update_drill_annotation(
     });
 
     let api: kube::Api<StellarNode> = kube::Api::namespaced(client.clone(), &namespace);
-    api.patch(&name, &PatchParams::apply("stellar-operator-dr-drill"), &Patch::Merge(&patch))
-        .await
-        .map_err(|e| Error::KubeError(e))?;
+    api.patch(
+        &name,
+        &PatchParams::apply("stellar-operator-dr-drill"),
+        &Patch::Merge(&patch),
+    )
+    .await
+    .map_err(Error::KubeError)?;
 
     Ok(())
 }
