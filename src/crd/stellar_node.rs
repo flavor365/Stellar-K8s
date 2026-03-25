@@ -15,7 +15,8 @@ use super::types::{
     HistoryMode, HorizonConfig, IngressConfig, LoadBalancerConfig, ManagedDatabaseConfig,
     NetworkPolicyConfig, NodeType, OciSnapshotConfig, PodAntiAffinityStrength,
     ResourceRequirements, RestoreFromSnapshotConfig, RetentionPolicy, RolloutStrategy,
-    SnapshotScheduleConfig, SorobanConfig, StellarNetwork, StorageConfig, ValidatorConfig, VpaConfig,
+    SnapshotScheduleConfig, SorobanConfig, StellarNetwork, StorageConfig, ValidatorConfig,
+    VpaConfig,
 };
 
 /// Structured validation error for `StellarNodeSpec`

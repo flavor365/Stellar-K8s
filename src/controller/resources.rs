@@ -36,6 +36,7 @@ use kube::api::{Api, DeleteParams, Patch, PatchParams, PostParams};
 use kube::{Client, Resource, ResourceExt};
 use tracing::{info, instrument, warn};
 
+use crate::crd::types::PodAntiAffinityStrength;
 use crate::crd::{
     BackupConfiguration, BarmanObjectStore, BootstrapConfiguration, Cluster, ClusterSpec,
     HistoryMode, HsmProvider, IngressConfig, InitDbConfiguration, KeySource, ManagedDatabaseConfig,
@@ -44,7 +45,6 @@ use crate::crd::{
     SecretKeySelector as CnpgSecretKeySelector, StellarNode, StellarNodeSpec, StorageConfiguration,
     WalBackupConfiguration,
 };
-use crate::crd::types::PodAntiAffinityStrength;
 use crate::error::{Error, Result};
 
 /// Get the standard labels for a StellarNode's resources

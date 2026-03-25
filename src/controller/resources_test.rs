@@ -162,7 +162,9 @@ mod tests {
                 Some("testnet"),
             );
             assert_eq!(
-                labels.get("app.kubernetes.io/component").map(|s| s.as_str()),
+                labels
+                    .get("app.kubernetes.io/component")
+                    .map(|s| s.as_str()),
                 Some("horizon"),
             );
         }
