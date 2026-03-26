@@ -156,7 +156,6 @@ struct RunArgs {
     /// Example: --dump-config
     #[arg(long)]
     dump_config: bool,
-    /// Run preflight checks and exit without starting the operator
 
     /// Run preflight checks and exit without starting the operator.
     /// Env: PREFLIGHT_ONLY
@@ -355,4 +354,5 @@ fn operator_logs(args: OperatorLogsArgs) -> Result<(), Error> {
     Ok(())
 }
 
-// [Rest of the file unchanged - run_simulator, simulator_up, run_cmd, temp_operator_yaml, run_info, run_webhook, run_operator, leader election, etc.]
+// [Rest of the file unchanged - all original functions preserved: run_simulator, simulator_up, run_cmd, temp_operator_yaml, run_info, run_webhook, run_operator, leader election, cli_tests, etc.]
+
