@@ -39,7 +39,7 @@ use kube::{
     },
     Resource, ResourceExt,
 };
-use tracing::{debug, error, info, instrument, warn};
+use tracing::{debug, error, info, info_span, instrument, warn};
 
 use crate::crd::{
     DisasterRecoveryStatus, NodeType, RolloutStrategy, SpecValidationError, StellarNode,
@@ -93,6 +93,18 @@ pub struct ControllerState {
     pub event_reporter: Reporter,
     /// Operator-level config loaded from the Helm-rendered ConfigMap (defaultResources).
     pub operator_config: std::sync::Arc<OperatorConfig>,
+    /// Counter for generating unique reconcile IDs
+    pub reconcile_id_counter: std::sync::atomic::AtomicU64,
+    /// Timestamp of the last successful reconcile
+    pub last_reconcile_success: std::sync::Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl ControllerState {
+    /// Generate a unique reconcile ID
+    pub fn next_reconcile_id(&self) -> u64 {
+        self.reconcile_id_counter
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+    }
 }
 
 /// Main entry point to start the controller
@@ -219,12 +231,7 @@ pub async fn run_controller(state: Arc<ControllerState>) -> Result<()> {
         )
         .shutdown_on_signal()
         .run(reconcile, error_policy, state)
-        .for_each(|res| async move {
-            match res {
-                Ok(obj) => info!("Reconciled: {:?}", obj),
-                Err(e) => error!("Reconcile error: {:?}", e),
-            }
-        })
+        .for_each(|_res| async {})
         .await;
 
     Ok(())
@@ -404,8 +411,24 @@ where
 /// - A StellarNode is created, updated, or deleted
 /// - An owned resource (Deployment, Service, PVC) changes
 /// - The requeue timer expires
-#[instrument(skip(ctx), fields(name = %obj.name_any(), namespace = obj.namespace()))]
 async fn reconcile(obj: Arc<StellarNode>, ctx: Arc<ControllerState>) -> Result<Action> {
+    let node_name = obj.name_any();
+    let namespace = obj.namespace().unwrap_or_else(|| "default".to_string());
+    let reconcile_id = ctx.next_reconcile_id();
+
+    let node_name_for_span = node_name.clone();
+    let namespace_for_span = namespace.clone();
+
+    // Attach per-reconcile structured fields so every log event during reconciliation
+    // can be correlated in JSON logs (node_name/namespace/reconcile_id).
+    let _reconcile_span = info_span!(
+        "reconcile_attempt",
+        node_name = %node_name_for_span,
+        namespace = %namespace_for_span,
+        reconcile_id = %reconcile_id
+    );
+    let _reconcile_enter = _reconcile_span.enter();
+
     #[cfg(feature = "metrics")]
     let reconcile_start = std::time::Instant::now();
 
@@ -416,14 +439,11 @@ async fn reconcile(obj: Arc<StellarNode>, ctx: Arc<ControllerState>) -> Result<A
 
     let res = {
         let client = ctx.client.clone();
-        let namespace = obj.namespace().unwrap_or_else(|| "default".to_string());
         let api: Api<StellarNode> = Api::namespaced(client.clone(), &namespace);
 
         info!(
             "Reconciling StellarNode {}/{} (type: {:?})",
-            namespace,
-            obj.name_any(),
-            obj.spec.node_type
+            namespace, node_name, obj.spec.node_type
         );
 
         // Use kube-rs built-in finalizer helper for clean lifecycle management
@@ -450,6 +470,14 @@ async fn reconcile(obj: Arc<StellarNode>, ctx: Arc<ControllerState>) -> Result<A
                 _ => "unknown",
             };
             metrics::inc_reconcile_error("stellarnode", kind);
+        } else {
+            // Record successful reconciliation timestamp
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            ctx.last_reconcile_success
+                .store(now, std::sync::atomic::Ordering::Relaxed);
         }
     }
 
@@ -2522,7 +2550,22 @@ pub(crate) fn error_policy(
     error: &Error,
     ctx: Arc<ControllerState>,
 ) -> Action {
-    error!("Reconciliation error for {}: {:?}", node.name_any(), error);
+    let node_name = node.name_any();
+    let namespace = node.namespace().unwrap_or_else(|| "default".to_string());
+    let reconcile_id = ctx.next_reconcile_id();
+
+    let node_name_for_span = node_name.clone();
+    let namespace_for_span = namespace.clone();
+
+    let _error_span = info_span!(
+        "reconcile_error",
+        node_name = %node_name_for_span,
+        namespace = %namespace_for_span,
+        reconcile_id = %reconcile_id
+    );
+    let _enter = _error_span.enter();
+
+    error!("Reconciliation error for {}: {:?}", node_name, error);
 
     // Get retry count from annotations (default to 0)
     let retry_count = node

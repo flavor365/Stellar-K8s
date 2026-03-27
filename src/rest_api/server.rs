@@ -79,12 +79,19 @@ async fn dashboard_ui() -> axum::response::Html<&'static str> {
 /// shared with a certificate rotation task: after rotating the Secret, build a new
 /// `ServerConfig` and call `reload_from_config` on the RustlsConfig to adopt the new
 /// certificate without dropping active connections.
+#[tracing::instrument(
+    skip(state),
+    fields(node_name = "-", namespace = "-", reconcile_id = "-")
+)]
 pub async fn run_server(
     state: Arc<ControllerState>,
     rustls_config: Option<RustlsConfig>,
 ) -> Result<()> {
     let mut app = Router::new()
         .route("/health", get(handlers::health))
+        .route("/healthz", get(handlers::healthz))
+        .route("/readyz", get(handlers::readyz))
+        .route("/livez", get(handlers::livez))
         .route("/leader", get(handlers::leader_status))
         .route("/api/v1/nodes", get(handlers::list_nodes))
         .route("/api/v1/nodes/:namespace/:name", get(handlers::get_node))

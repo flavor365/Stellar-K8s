@@ -10,7 +10,7 @@ use k8s_openapi::apimachinery::pkg::apis::meta::v1::MicroTime;
 use kube::api::{Api, ObjectMeta, Patch, PatchParams, PostParams};
 use kube::ResourceExt;
 use stellar_k8s::{controller, crd::StellarNode, preflight, Error};
-use tracing::{debug, info, warn, Level};
+use tracing::{debug, info, info_span, warn, Instrument, Level};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 #[derive(Parser, Debug)]
@@ -57,6 +57,12 @@ enum Commands {
         #[arg(value_enum)]
         shell: clap_complete::Shell,
     },
+}
+
+#[derive(clap::ValueEnum, Clone, Debug)]
+enum LogFormat {
+    Json,
+    Pretty,
 }
 
 #[derive(Parser, Debug)]
@@ -270,6 +276,10 @@ struct WebhookArgs {
     /// Example: --log-level debug
     #[arg(long, env = "LOG_LEVEL", default_value = "info")]
     log_level: String,
+
+    /// Log output format (json or pretty)
+    #[arg(long, env = "LOG_FORMAT", value_enum, default_value = "json")]
+    log_format: LogFormat,
 }
 
 #[tokio::main]
@@ -669,10 +679,18 @@ async fn run_webhook(args: WebhookArgs) -> Result<(), Error> {
         .with_default_directive(args.log_level.parse().unwrap_or(Level::INFO.into()))
         .from_env_lossy();
 
+    let fmt_layer = fmt::layer().json().with_target(true);
+
+    let namespace = std::env::var("OPERATOR_NAMESPACE").unwrap_or_else(|_| "default".to_string());
+
     tracing_subscriber::registry()
         .with(env_filter)
-        .with(fmt::layer().with_target(true))
+        .with(fmt_layer)
         .init();
+
+    let root_span =
+        info_span!("operator", node_name = "-", namespace = %namespace, reconcile_id = "-");
+    let _root_enter = root_span.enter();
 
     info!(
         "Starting Webhook Server v{} on {}",
@@ -746,7 +764,7 @@ async fn run_operator(args: RunArgs) -> Result<(), Error> {
         .with_default_directive(Level::INFO.into())
         .from_env_lossy();
 
-    let fmt_layer = fmt::layer().with_target(true);
+    let fmt_layer = fmt::layer().json().with_target(true);
 
     // Register the subscriber with both stdout logging and OpenTelemetry tracing
     let registry = tracing_subscriber::registry()
@@ -759,9 +777,21 @@ async fn run_operator(args: RunArgs) -> Result<(), Error> {
     if otel_enabled {
         let otel_layer = stellar_k8s::telemetry::init_telemetry(&registry);
         registry.with(otel_layer).init();
-        info!("OpenTelemetry tracing initialized");
     } else {
         registry.init();
+    }
+
+    let root_span = info_span!(
+        "operator",
+        node_name = "-",
+        namespace = %args.namespace,
+        reconcile_id = "-"
+    );
+    let _root_enter = root_span.enter();
+
+    if otel_enabled {
+        info!("OpenTelemetry tracing initialized");
+    } else {
         info!("OpenTelemetry tracing disabled (OTEL_EXPORTER_OTLP_ENDPOINT not set)");
     }
 
@@ -854,9 +884,12 @@ async fn run_operator(args: RunArgs) -> Result<(), Error> {
         let identity = holder_identity.clone();
         let is_leader_bg = Arc::clone(&is_leader);
 
-        tokio::spawn(async move {
-            run_leader_election(lease_client, &lease_ns, &identity, is_leader_bg).await;
-        });
+        tokio::spawn(
+            async move {
+                run_leader_election(lease_client, &lease_ns, &identity, is_leader_bg).await;
+            }
+            .instrument(root_span.clone()),
+        );
     }
 
     // Update leader-status and uptime metrics every 10 s (Issue #301)
@@ -889,18 +922,23 @@ async fn run_operator(args: RunArgs) -> Result<(), Error> {
             instance: None,
         },
         operator_config: Arc::new(operator_config),
+        reconcile_id_counter: std::sync::atomic::AtomicU64::new(0),
+        last_reconcile_success: Arc::new(std::sync::atomic::AtomicU64::new(0)),
     });
 
     // Start the peer discovery manager
     let peer_discovery_client = client.clone();
     let peer_discovery_config = controller::PeerDiscoveryConfig::default();
-    tokio::spawn(async move {
-        let manager =
-            controller::PeerDiscoveryManager::new(peer_discovery_client, peer_discovery_config);
-        if let Err(e) = manager.run().await {
-            tracing::error!("Peer discovery manager error: {:?}", e);
+    tokio::spawn(
+        async move {
+            let manager =
+                controller::PeerDiscoveryManager::new(peer_discovery_client, peer_discovery_config);
+            if let Err(e) = manager.run().await {
+                tracing::error!("Peer discovery manager error: {:?}", e);
+            }
         }
-    });
+        .instrument(root_span.clone()),
+    );
 
     // Start the feature-flag watcher (watches stellar-operator-config ConfigMap)
     let feature_flags = controller::feature_flags::new_shared();
@@ -930,11 +968,14 @@ async fn run_operator(args: RunArgs) -> Result<(), Error> {
             .map(axum_server::tls_rustls::RustlsConfig::from_config);
         let server_tls = rustls_config.clone();
 
-        tokio::spawn(async move {
-            if let Err(e) = stellar_k8s::rest_api::run_server(api_state, server_tls).await {
-                tracing::error!("REST API server error: {:?}", e);
+        tokio::spawn(
+            async move {
+                if let Err(e) = stellar_k8s::rest_api::run_server(api_state, server_tls).await {
+                    tracing::error!("REST API server error: {:?}", e);
+                }
             }
-        });
+            .instrument(root_span.clone()),
+        );
 
         // Certificate rotation: when mTLS is enabled, periodically check and rotate
         // server cert if within threshold, then graceful reload of TLS config
@@ -951,60 +992,66 @@ async fn run_operator(args: RunArgs) -> Result<(), Error> {
                 .unwrap_or(controller::mtls::DEFAULT_CERT_ROTATION_THRESHOLD_DAYS);
             let is_leader_rot = Arc::clone(&is_leader);
 
-            tokio::spawn(async move {
-                let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600)); // check hourly
-                interval.tick().await; // first tick completes immediately
-                loop {
-                    interval.tick().await;
-                    if !is_leader_rot.load(Ordering::Relaxed) {
-                        continue;
-                    }
-                    match controller::mtls::maybe_rotate_server_cert(
-                        &rotation_client,
-                        &rotation_namespace,
-                        rotation_dns.clone(),
-                        rotation_threshold_days,
-                    )
-                    .await
-                    {
-                        Ok(true) => {
-                            // Rotation performed: fetch new secret and reload TLS
-                            let secrets: kube::Api<k8s_openapi::api::core::v1::Secret> =
-                                kube::Api::namespaced(rotation_client.clone(), &rotation_namespace);
-                            if let Ok(secret) =
-                                secrets.get(controller::mtls::SERVER_CERT_SECRET_NAME).await
-                            {
-                                if let (Some(cert), Some(key), Some(ca)) = (
-                                    secret.data.as_ref().and_then(|d| d.get("tls.crt")),
-                                    secret.data.as_ref().and_then(|d| d.get("tls.key")),
-                                    secret.data.as_ref().and_then(|d| d.get("ca.crt")),
-                                ) {
-                                    match stellar_k8s::rest_api::build_tls_server_config(
-                                        &cert.0, &key.0, &ca.0,
+            tokio::spawn(
+                async move {
+                    let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600)); // check hourly
+                    interval.tick().await; // first tick completes immediately
+                    loop {
+                        interval.tick().await;
+                        if !is_leader_rot.load(Ordering::Relaxed) {
+                            continue;
+                        }
+                        match controller::mtls::maybe_rotate_server_cert(
+                            &rotation_client,
+                            &rotation_namespace,
+                            rotation_dns.clone(),
+                            rotation_threshold_days,
+                        )
+                        .await
+                        {
+                            Ok(true) => {
+                                // Rotation performed: fetch new secret and reload TLS
+                                let secrets: kube::Api<k8s_openapi::api::core::v1::Secret> =
+                                    kube::Api::namespaced(
+                                        rotation_client.clone(),
+                                        &rotation_namespace,
+                                    );
+                                if let Ok(secret) =
+                                    secrets.get(controller::mtls::SERVER_CERT_SECRET_NAME).await
+                                {
+                                    if let (Some(cert), Some(key), Some(ca)) = (
+                                        secret.data.as_ref().and_then(|d| d.get("tls.crt")),
+                                        secret.data.as_ref().and_then(|d| d.get("tls.key")),
+                                        secret.data.as_ref().and_then(|d| d.get("ca.crt")),
                                     ) {
-                                        Ok(new_config) => {
-                                            rustls_config.reload_from_config(new_config);
-                                            info!(
+                                        match stellar_k8s::rest_api::build_tls_server_config(
+                                            &cert.0, &key.0, &ca.0,
+                                        ) {
+                                            Ok(new_config) => {
+                                                rustls_config.reload_from_config(new_config);
+                                                info!(
                                                 "TLS server config reloaded with new certificate"
                                             );
-                                        }
-                                        Err(e) => {
-                                            tracing::error!(
+                                            }
+                                            Err(e) => {
+                                                tracing::error!(
                                                 "Failed to build TLS config after rotation: {:?}",
                                                 e
                                             );
+                                            }
                                         }
                                     }
                                 }
                             }
-                        }
-                        Ok(false) => {}
-                        Err(e) => {
-                            tracing::error!("Certificate rotation check failed: {:?}", e);
+                            Ok(false) => {}
+                            Err(e) => {
+                                tracing::error!("Certificate rotation check failed: {:?}", e);
+                            }
                         }
                     }
                 }
-            });
+                .instrument(root_span.clone()),
+            );
         }
     }
 
