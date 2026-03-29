@@ -9,6 +9,8 @@ use k8s_openapi::apiextensions_apiserver::pkg::apis::apiextensions::v1::CustomRe
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::MicroTime;
 use kube::api::{Api, ObjectMeta, Patch, PatchParams, PostParams};
 use kube::ResourceExt;
+use stellar_k8s::controller::archive_prune::{prune_archive, PruneArchiveArgs};
+use stellar_k8s::controller::diff::{diff, DiffArgs};
 use stellar_k8s::infra;
 use stellar_k8s::{controller, crd::StellarNode, preflight, Error};
 use tracing::{debug, info, info_span, warn, Instrument, Level};
@@ -50,6 +52,10 @@ enum Commands {
     Info(InfoArgs),
     /// Verify StellarNode CRD installation and expected version
     CheckCrd,
+    /// Prune old history archive checkpoints
+    PruneArchive(PruneArchiveArgs),
+    /// Show difference between desired and live cluster state
+    Diff(DiffArgs),
     /// Local simulator (kind/k3s + operator + demo validators)
     Simulator(SimulatorCli),
     /// Generate shell completion scripts
@@ -321,6 +327,12 @@ async fn main() -> Result<(), Error> {
             let name = cmd.get_name().to_string();
             generate(shell, &mut cmd, name, &mut std::io::stdout());
             return Ok(());
+        }
+        Commands::PruneArchive(prune_args) => {
+            return prune_archive(prune_args).await;
+        }
+        Commands::Diff(diff_args) => {
+            return diff(diff_args).await;
         }
     }
 }
